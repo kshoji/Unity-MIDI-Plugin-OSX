@@ -34,6 +34,8 @@ extern "C" {
 #endif
     void midiPluginInitialize();
     void midiPluginTerminate();
+    void midiPluginStartForEditor();
+    void midiPluginStopForEditor();
 
     void SetMidiInputDeviceAttachedCallback(OnMidiInputDeviceAttachedDelegate callback);
     void SetMidiOutputDeviceAttachedCallback(OnMidiOutputDeviceAttachedDelegate callback);
@@ -132,6 +134,31 @@ void midiPluginTerminate() {
     MIDIPortDispose(outputPort);
     MIDIClientDispose(midiClient);
     instance = nil;
+}
+
+void midiPluginStartForEditor() {
+    // NOTE: call before `midiPluginInitialize` method
+
+    if (!instance) {
+        return;
+    }
+
+    // notify known devices attached
+    for (NSNumber* key in sourceSet) {
+        if (onMidiInputDeviceAttached) {
+            onMidiInputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+        }
+    }
+    for (NSNumber* key in destinationSet) {
+        if (onMidiOutputDeviceAttached) {
+            onMidiOutputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+        }
+    }
+}
+
+void midiPluginStopForEditor() {
+    [[NSNotificationCenter defaultCenter] removeObserver: instance];
+    [deviceUpdateTimer invalidate];
 }
 
 const char* getDeviceName(const char* deviceId) {
