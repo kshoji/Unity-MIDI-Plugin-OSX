@@ -119,10 +119,15 @@ void midiPluginInitialize() {
     [deviceUpdateTimer fire];
 
     // network session
-    MIDINetworkSession* session = [MIDINetworkSession defaultSession];
-    session.enabled = YES;
-    session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
-    [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+    if (@available(macOS 10.15, *)) {
+        MIDINetworkSession* session = [MIDINetworkSession defaultSession];
+        session.enabled = YES;
+        session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+
+        [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+    } else {
+        // Fallback on earlier versions
+    }
 }
 
 void midiPluginTerminate() {
