@@ -5,6 +5,7 @@
 
 #import "MIDIPlugin.h"
 
+// MIDI 1.0 events
 typedef void ( __cdecl *OnMidiInputDeviceAttachedDelegate )( const char* );
 typedef void ( __cdecl *OnMidiOutputDeviceAttachedDelegate )( const char* );
 typedef void ( __cdecl *OnMidiInputDeviceDetachedDelegate )( const char* );
@@ -29,6 +30,14 @@ typedef void ( __cdecl *OnMidiStopDelegate )( const char*, int );
 typedef void ( __cdecl *OnMidiActiveSensingDelegate )( const char*, int );
 typedef void ( __cdecl *OnMidiResetDelegate )( const char*, int );
 
+// MIDI 2.0 events
+typedef void ( __cdecl *OnMidi2InputDeviceAttachedDelegate )( const char* );
+typedef void ( __cdecl *OnMidi2OutputDeviceAttachedDelegate )( const char* );
+typedef void ( __cdecl *OnMidi2InputDeviceDetachedDelegate )( const char* );
+typedef void ( __cdecl *OnMidi2OutputDeviceDetachedDelegate )( const char* );
+
+typedef void ( __cdecl *OnUmpMessageDelegate )( const char*, const char* );
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +45,11 @@ extern "C" {
     void midiPluginTerminate();
     void midiPluginStartForEditor();
     void midiPluginStopForEditor();
+
+    void midi2PluginInitialize();
+    void midi2PluginTerminate();
+    void midi2PluginStartForEditor();
+    void midi2PluginStopForEditor();
 
     void SetMidiInputDeviceAttachedCallback(OnMidiInputDeviceAttachedDelegate callback);
     void SetMidiOutputDeviceAttachedCallback(OnMidiOutputDeviceAttachedDelegate callback);
@@ -46,6 +60,8 @@ extern "C" {
     const char* getDeviceName(const char* deviceId);
     const char* getVendorId(const char* deviceId);
     const char* getProductId(const char* deviceId);
+
+    // MIDI 1.0 events
     void SetMidiNoteOnCallback(OnMidiNoteOnDelegate callback);
     void SetMidiNoteOffCallback(OnMidiNoteOffDelegate callback);
     void SetMidiPolyphonicAftertouchDelegate(OnMidiPolyphonicAftertouchDelegate callback);
@@ -65,6 +81,16 @@ extern "C" {
     void SetMidiActiveSensingDelegate(OnMidiActiveSensingDelegate callback);
     void SetMidiResetDelegate(OnMidiResetDelegate callback);
 
+    void SetMidi2InputDeviceAttachedCallback(OnMidi2InputDeviceAttachedDelegate callback);
+    void SetMidi2OutputDeviceAttachedCallback(OnMidi2OutputDeviceAttachedDelegate callback);
+    void SetMidi2InputDeviceDetachedCallback(OnMidi2InputDeviceDetachedDelegate callback);
+    void SetMidi2OutputDeviceDetachedCallback(OnMidi2OutputDeviceDetachedDelegate callback);
+
+    void sendUmpMessage(const char* deviceId, UInt32* wordArray, int length);
+
+    // MIDI 2.0 events
+    void SetUmpMessageCallback(OnUmpMessageDelegate callback);
+
 #ifdef __cplusplus
 }
 #endif
@@ -74,6 +100,7 @@ extern "C" {
 static MidiPlugin* instance;
 
 MIDIClientRef midiClient;
+MIDIPortRef inputPort2;
 MIDIPortRef inputPort;
 MIDIPortRef outputPort;
 NSHashTable *sourceSet;
@@ -83,14 +110,18 @@ NSMutableDictionary *packetLists;
 NSMutableDictionary *deviceNames;
 NSMutableDictionary *vendorNames;
 NSMutableDictionary *productNames;
+NSMutableDictionary *protocols;
 
 NSTimer *deviceUpdateTimer;
+BOOL isMidi1Enable = NO;
+BOOL isMidi2Enable = NO;
 
 OnMidiInputDeviceAttachedDelegate onMidiInputDeviceAttached;
 OnMidiOutputDeviceAttachedDelegate onMidiOutputDeviceAttached;
 OnMidiInputDeviceDetachedDelegate onMidiInputDeviceDetached;
 OnMidiOutputDeviceDetachedDelegate onMidiOutputDeviceDetached;
 
+// MIDI 1.0 events
 OnMidiNoteOnDelegate onMidiNoteOn;
 OnMidiNoteOffDelegate onMidiNoteOff;
 OnMidiPolyphonicAftertouchDelegate onMidiPolyphonicAftertouch;
@@ -110,28 +141,48 @@ OnMidiStopDelegate onMidiStop;
 OnMidiActiveSensingDelegate onMidiActiveSensing;
 OnMidiResetDelegate onMidiReset;
 
+// MIDI 2.0 events
+OnMidi2InputDeviceAttachedDelegate onMidi2InputDeviceAttached;
+OnMidi2OutputDeviceAttachedDelegate onMidi2OutputDeviceAttached;
+OnMidi2InputDeviceDetachedDelegate onMidi2InputDeviceDetached;
+OnMidi2OutputDeviceDetachedDelegate onMidi2OutputDeviceDetached;
+
+OnUmpMessageDelegate onUmpMessage;
+
 void midiPluginInitialize() {
+    isMidi1Enable = YES;
+    BOOL isNewInstance = NO;
     if (instance == nil) {
         instance = [[MidiPlugin alloc] init];
+        isNewInstance = YES;
     }
-
-    deviceUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:instance selector:@selector(getMidiDevices) userInfo:nil repeats:YES];
-    [deviceUpdateTimer fire];
-
+    
+    if (deviceUpdateTimer == nil) {
+        deviceUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:instance selector:@selector(getMidiDevices) userInfo:nil repeats:YES];
+        [deviceUpdateTimer fire];
+    }
+    
     // network session
-    if (@available(macOS 10.15, *)) {
+    if (@available(macOS 10.15, iOS 4.2, *)) {
         MIDINetworkSession* session = [MIDINetworkSession defaultSession];
         session.enabled = YES;
         session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
 
-        [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
-    } else {
-        // Fallback on earlier versions
+        if (isNewInstance) {
+            [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+        }
     }
 }
 
 void midiPluginTerminate() {
-    [deviceUpdateTimer invalidate];
+    isMidi1Enable = NO;
+
+    if (!isMidi1Enable && !isMidi2Enable) {
+        if (deviceUpdateTimer != nil) {
+            [deviceUpdateTimer invalidate];
+            deviceUpdateTimer = nil;
+        }
+    }
 
     NSUInteger sourceCount = MIDIGetNumberOfSources();
     for (NSUInteger i = 0; i < sourceCount; ++i) {
@@ -140,9 +191,60 @@ void midiPluginTerminate() {
     }
 
     MIDIPortDispose(inputPort);
-    MIDIPortDispose(outputPort);
-    MIDIClientDispose(midiClient);
-    instance = nil;
+    if (!isMidi1Enable && !isMidi2Enable) {
+        MIDIPortDispose(outputPort);
+        MIDIClientDispose(midiClient);
+        instance = nil;
+    }
+}
+
+void midi2PluginInitialize() {
+    isMidi2Enable = YES;
+    BOOL isNewInstance = NO;
+    if (instance == nil) {
+        instance = [[MidiPlugin alloc] init];
+        isNewInstance = YES;
+    }
+    
+    if (deviceUpdateTimer == nil) {
+        deviceUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:instance selector:@selector(getMidiDevices) userInfo:nil repeats:YES];
+        [deviceUpdateTimer fire];
+    }
+    
+    // network session
+    if (@available(macOS 10.15, iOS 4.2, *)) {
+        MIDINetworkSession* session = [MIDINetworkSession defaultSession];
+        session.enabled = YES;
+        session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+
+        if (isNewInstance) {
+            [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+        }
+    }
+}
+
+void midi2PluginTerminate() {
+    isMidi2Enable = NO;
+
+    if (!isMidi1Enable && !isMidi2Enable) {
+        if (deviceUpdateTimer != nil) {
+            [deviceUpdateTimer invalidate];
+            deviceUpdateTimer = nil;
+        }
+    }
+
+    NSUInteger sourceCount = MIDIGetNumberOfSources();
+    for (NSUInteger i = 0; i < sourceCount; ++i) {
+        MIDIEndpointRef endpoint = MIDIGetSource(i);
+        MIDIPortDisconnectSource(inputPort2, endpoint);
+    }
+
+    MIDIPortDispose(inputPort2);
+    if (!isMidi1Enable && !isMidi2Enable) {
+        MIDIPortDispose(outputPort);
+        MIDIClientDispose(midiClient);
+        instance = nil;
+    }
 }
 
 void midiPluginStartForEditor() {
@@ -152,22 +254,91 @@ void midiPluginStartForEditor() {
         return;
     }
 
+    // network session
+    if (@available(macOS 10.15, iOS 4.2, *)) {
+        MIDINetworkSession* session = [MIDINetworkSession defaultSession];
+        session.enabled = YES;
+        session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+
+        [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+    }
+
+    if (!isMidi1Enable) {
+        return;
+    }
+
     // notify known devices attached
-    for (NSNumber* key in sourceSet) {
-        if (onMidiInputDeviceAttached) {
-            onMidiInputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+    if (onMidiInputDeviceAttached) {
+        for (NSNumber* key in sourceSet) {
+            MIDIProtocolID protocolId = (MIDIProtocolID)[(NSNumber*)protocols[key] intValue];
+            if (protocolId == kMIDIProtocol_1_0) {
+                onMidiInputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+            }
         }
     }
-    for (NSNumber* key in destinationSet) {
-        if (onMidiOutputDeviceAttached) {
-            onMidiOutputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+    if (onMidiOutputDeviceAttached) {
+        for (NSNumber* key in destinationSet) {
+            MIDIProtocolID protocolId = (MIDIProtocolID)[(NSNumber*)protocols[key] intValue];
+            if (protocolId == kMIDIProtocol_1_0) {
+                onMidiOutputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+            }
         }
     }
 }
 
 void midiPluginStopForEditor() {
     [[NSNotificationCenter defaultCenter] removeObserver: instance];
-    [deviceUpdateTimer invalidate];
+    if (deviceUpdateTimer != nil) {
+        [deviceUpdateTimer invalidate];
+        deviceUpdateTimer = nil;
+    }
+}
+
+void midi2PluginStartForEditor() {
+    // NOTE: call before `midiPluginInitialize` method
+
+    if (!instance) {
+        return;
+    }
+
+    // network session
+    if (@available(macOS 10.15, iOS 4.2, *)) {
+        MIDINetworkSession* session = [MIDINetworkSession defaultSession];
+        session.enabled = YES;
+        session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+
+        [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+    }
+
+    if (!isMidi2Enable) {
+        return;
+    }
+
+    // notify known devices attached
+    if (onMidi2InputDeviceDetached) {
+        for (NSNumber* key in sourceSet) {
+            MIDIProtocolID protocolId = (MIDIProtocolID)[(NSNumber*)protocols[key] intValue];
+            if (protocolId == kMIDIProtocol_2_0) {
+                onMidi2InputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+            }
+        }
+    }
+    if (onMidi2OutputDeviceAttached) {
+        for (NSNumber* key in destinationSet) {
+            MIDIProtocolID protocolId = (MIDIProtocolID)[(NSNumber*)protocols[key] intValue];
+            if (protocolId == kMIDIProtocol_2_0) {
+                onMidi2OutputDeviceAttached([NSString stringWithFormat:@"%@", key].UTF8String);
+            }
+        }
+    }
+}
+
+void midi2PluginStopForEditor() {
+    [[NSNotificationCenter defaultCenter] removeObserver: instance];
+    if (deviceUpdateTimer != nil) {
+        [deviceUpdateTimer invalidate];
+        deviceUpdateTimer = nil;
+    }
 }
 
 const char* getDeviceName(const char* deviceId) {
@@ -277,6 +448,24 @@ void SetMidiResetDelegate(OnMidiResetDelegate callback) {
     onMidiReset = callback;
 }
 
+// MIDI 2.0
+void SetMidi2InputDeviceAttachedCallback(OnMidi2InputDeviceAttachedDelegate callback) {
+    onMidi2InputDeviceAttached = callback;
+}
+void SetMidi2OutputDeviceAttachedCallback(OnMidi2OutputDeviceAttachedDelegate callback) {
+    onMidi2OutputDeviceAttached = callback;
+}
+void SetMidi2InputDeviceDetachedCallback(OnMidi2InputDeviceDetachedDelegate callback) {
+    onMidi2InputDeviceDetached = callback;
+}
+void SetMidi2OutputDeviceDetachedCallback(OnMidi2OutputDeviceDetachedDelegate callback) {
+    onMidi2OutputDeviceDetached = callback;
+}
+
+void SetUmpMessageCallback(OnUmpMessageDelegate callback) {
+    onUmpMessage = callback;
+}
+
 void sendMidiData(const char* deviceId, unsigned char* byteArray, int length) {
     ItemCount numOfDevices = MIDIGetNumberOfDevices();
     BOOL deviceFound = NO;
@@ -325,22 +514,203 @@ void sendMidiData(const char* deviceId, unsigned char* byteArray, int length) {
 }
 
 void sendMidiPacketToDevice(MIDIEndpointRef endpoint, unsigned char* byteArray, int length) {
-    MIDIPacketList packetList;
-    MIDIPacket* packet = MIDIPacketListInit(&packetList);
-    packet = MIDIPacketListAdd(&packetList, sizeof(packetList), packet, mach_absolute_time(), length, byteArray);
-    
-    if (packet) {
-        OSStatus err = MIDISend(outputPort, endpoint, &packetList);
-        if (err != noErr) {
-            // Handle the error
-            NSLog(@"Error sending MIDI data: %d", (int)err);
+    MIDIProtocolID protocolId = kMIDIProtocol_1_0;
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        SInt32 protocolIdValue;
+        if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyProtocolID, &protocolIdValue) == noErr) {
+            protocolId = (MIDIProtocolID)protocolIdValue;
+        }
+    }
+
+    if (protocolId == kMIDIProtocol_1_0) {
+        MIDIPacketList packetList = {};
+        MIDIPacket* packet = MIDIPacketListInit(&packetList);
+        packet = MIDIPacketListAdd(&packetList, sizeof(packetList), packet, mach_absolute_time(), length, byteArray);
+        
+        if (packet) {
+            MIDISend(outputPort, endpoint, &packetList);
+        }
+    } else if (protocolId == kMIDIProtocol_2_0) {
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            int wordSize = (length + 3) / 4;
+            unsigned int* words = new unsigned int[wordSize];
+            for (int i = 0; i < length; i++) {
+                words[i / 4] |= ((unsigned int)byteArray[i]) << (8 * (3 - (i % 4)));
+            }
+
+            MIDIEventList packetList = {};
+            MIDIEventPacket* packet = MIDIEventListInit(&packetList, kMIDIProtocol_2_0);
+            packet = MIDIEventListAdd(&packetList, sizeof(packetList), packet, mach_absolute_time(), wordSize, words);
+
+            if (packet) {
+                MIDISendEventList(outputPort, endpoint, &packetList);
+            }
         }
     }
 }
 
+void sendUmpMessage(const char* deviceId, UInt32* wordArray, int length) {
+    ItemCount numOfDevices = MIDIGetNumberOfDevices();
+    BOOL deviceFound = NO;
+
+    // First, try to find and send to the device through entities (for physical devices)
+    for (ItemCount i = 0; i < numOfDevices && !deviceFound; i++) {
+        MIDIDeviceRef midiDevice = MIDIGetDevice(i);
+        ItemCount numOfEntities = MIDIDeviceGetNumberOfEntities(midiDevice);
+        
+        for (ItemCount j = 0; j < numOfEntities; j++) {
+            MIDIEntityRef midiEntity = MIDIDeviceGetEntity(midiDevice, j);
+            ItemCount numOfDestinations = MIDIEntityGetNumberOfDestinations(midiEntity);
+            
+            for (ItemCount k = 0; k < numOfDestinations; k++) {
+                MIDIEndpointRef endpoint = MIDIEntityGetDestination(midiEntity, k);
+                
+                SInt32 endpointUniqueId;
+                MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId);
+                NSString* endpointUniqueIdStr = [NSString stringWithFormat:@"%d", endpointUniqueId];
+                
+                if ([endpointUniqueIdStr isEqualToString:[NSString stringWithUTF8String:deviceId]]) {
+                    deviceFound = YES;
+                    sendUmpPacketToDevice(endpoint, wordArray, length);
+                    break;
+                }
+            }
+        }
+    }
+
+    // If the device wasn't found and it might be a virtual device, check destinations directly
+    if (!deviceFound) {
+        ItemCount numOfDestinations = MIDIGetNumberOfDestinations();
+        for (ItemCount i = 0; i < numOfDestinations; i++) {
+            MIDIEndpointRef endpoint = MIDIGetDestination(i);
+            
+            SInt32 endpointUniqueId;
+            MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId);
+            NSString* endpointUniqueIdStr = [NSString stringWithFormat:@"%d", endpointUniqueId];
+            
+            if ([endpointUniqueIdStr isEqualToString:[NSString stringWithUTF8String:deviceId]]) {
+                sendUmpPacketToDevice(endpoint, wordArray, length);
+                break;
+            }
+        }
+    }
+}
+
+void sendUmpPacketToDevice(MIDIEndpointRef endpoint, UInt32* wordArray, int length) {
+    if (@available(macOS 11.0, iOS 14.0, *)) {
+        MIDIProtocolID protocolId = kMIDIProtocol_1_0;
+        SInt32 protocolIdValue;
+        if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyProtocolID, &protocolIdValue) == noErr) {
+            protocolId = (MIDIProtocolID)protocolIdValue;
+        }
+        
+        if (protocolId == kMIDIProtocol_2_0) {
+            MIDIEventList packetList = {};
+            MIDIEventPacket* packet = MIDIEventListInit(&packetList, kMIDIProtocol_2_0);
+            packet = MIDIEventListAdd(&packetList, sizeof(packetList), packet, mach_absolute_time(), length, wordArray);
+            
+            if (packet) {
+                MIDISendEventList(outputPort, endpoint, &packetList);
+            }
+        }
+    }
+}
+
+void midi2InputCallback(const MIDIEventList *list, void * __nullable srcRef) {
+    if (!isMidi2Enable) {
+        return;
+    }
+
+    NSNumber* endpointId = (__bridge NSNumber*)srcRef;
+
+    // Checks the source is MIDI 2.0
+    BOOL sourceFound = NO;
+    ItemCount numOfSources = MIDIGetNumberOfSources();
+    for (ItemCount k = 0; k < numOfSources; k++) {
+        MIDIEndpointRef endpoint = MIDIGetSource(k);
+        
+        SInt32 endpointUniqueId;
+        MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId);
+        NSNumber* endpointNumber = [NSNumber numberWithInt:endpointUniqueId];
+        if (![endpointNumber isEqual:endpointId]) {
+            continue;
+        }
+        
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            MIDIProtocolID protocolId = kMIDIProtocol_1_0;
+            SInt32 protocolIdValue;
+            if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyProtocolID, &protocolIdValue) == noErr) {
+                protocolId = (MIDIProtocolID)protocolIdValue;
+            } else {
+                protocolId = kMIDIProtocol_1_0;
+            }
+            
+            if (protocolId == kMIDIProtocol_2_0) {
+                sourceFound = YES;
+                break;
+            }
+        }
+    }
+    if (!sourceFound) {
+        return;
+    }
+    
+    if (onUmpMessage) {
+        const MIDIEventPacket *packet = &list->packet[0]; //gets first packet in list
+        NSMutableString* umpMessage = [[NSMutableString alloc] init];
+        for (NSUInteger i = 0; i < list->numPackets; ++i) {
+            for (NSUInteger dataIndex = 0; dataIndex < packet->wordCount; dataIndex++) {
+                if (umpMessage.length > 0) {
+                    [umpMessage appendString: @","];
+                }
+                [umpMessage appendString: [NSString stringWithFormat:@"%u", static_cast<unsigned int>(packet->words[dataIndex])]];
+            }
+            packet = MIDIEventPacketNext(packet);
+        }
+        onUmpMessage([NSString stringWithFormat:@"%@", endpointId].UTF8String, umpMessage.UTF8String);
+    }
+}
+
 void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) {
+    if (!isMidi1Enable) {
+        return;
+    }
+
 //    MidiPlugin *plugin = (__bridge MidiPlugin*)procRef;
     NSNumber* endpointId = (__bridge NSNumber*)srcRef; // srcRef passed from MIDIPortConnectSource argument
+
+    // Checks the source is MIDI 1.0
+    BOOL sourceFound = NO;
+    ItemCount numOfSources = MIDIGetNumberOfSources();
+    for (ItemCount k = 0; k < numOfSources; k++) {
+        MIDIEndpointRef endpoint = MIDIGetSource(k);
+        
+        SInt32 endpointUniqueId;
+        MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId);
+        NSNumber* endpointNumber = [NSNumber numberWithInt:endpointUniqueId];
+        if (![endpointNumber isEqual:endpointId]) {
+            continue;
+        }
+
+        MIDIProtocolID protocolId = kMIDIProtocol_1_0;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            SInt32 protocolIdValue;
+            if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyProtocolID, &protocolIdValue) == noErr) {
+                protocolId = (MIDIProtocolID)protocolIdValue;
+            }
+            
+            if (protocolId == kMIDIProtocol_1_0) {
+                sourceFound = YES;
+                break;
+            }
+        } else {
+            sourceFound = YES;
+            break;
+        }
+    }
+    if (!sourceFound) {
+        return;
+    }
 
     const MIDIPacket *packet = &list->packet[0]; //gets first packet in list
     for (NSUInteger i = 0; i < list->numPackets; ++i) {
@@ -657,10 +1027,18 @@ void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) 
         deviceNames = [[NSMutableDictionary alloc] init];
         vendorNames = [[NSMutableDictionary alloc] init];
         productNames = [[NSMutableDictionary alloc] init];
+        protocols = [[NSMutableDictionary alloc] init];
 
-        MIDIClientCreate(CFSTR("MidiPlugin"), NULL, NULL, &midiClient);
-        MIDIInputPortCreate(midiClient, CFSTR("Input"), midiInputCallback, (__bridge_retained void *)self, &inputPort);
-        MIDIOutputPortCreate(midiClient, CFSTR("Output"), &outputPort);
+        if (MIDIClientCreate(CFSTR("MidiPlugin"), NULL, NULL, &midiClient) == noErr) {
+            if (@available(macOS 11.0, iOS 14.0, *)) {
+                MIDIInputPortCreateWithProtocol(midiClient, CFSTR("Input2"), kMIDIProtocol_2_0, &inputPort2, ^(const MIDIEventList *evtlist, void * __nullable srcConnRefCon) {
+                    midi2InputCallback(evtlist, srcConnRefCon);
+                });
+            }
+
+            MIDIInputPortCreate(midiClient, CFSTR("Input"), midiInputCallback, (__bridge_retained void *)self, &inputPort);
+            MIDIOutputPortCreate(midiClient, CFSTR("Output"), &outputPort);
+        }
     }
 
     return self;
@@ -676,24 +1054,53 @@ void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) 
         MIDIEndpointRef endpoint = MIDIGetSource(k);
 
         SInt32 endpointUniqueId;
-        MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId);
+        if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId) != noErr) {
+            continue;
+        }
         NSNumber* endpointNumber = [NSNumber numberWithInt:endpointUniqueId];
 
+        MIDIProtocolID protocolId = kMIDIProtocol_1_0;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            SInt32 protocolIdValue;
+            if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyProtocolID, &protocolIdValue) == noErr) {
+                protocolId = (MIDIProtocolID)protocolIdValue;
+            }
+        }
+
+        if (protocolId == kMIDIProtocol_2_0) {
+            if (!isMidi2Enable) {
+                continue;
+            }
+        } else {
+            if (!isMidi1Enable) {
+                continue;
+            }
+        }
+
+        protocols[endpointNumber] = [NSNumber numberWithInt: protocolId];
+
         CFStringRef deviceName;
-        MIDIObjectGetStringProperty(endpoint, kMIDIPropertyName, &deviceName);
-        deviceNames[endpointNumber] = (__bridge NSString *)deviceName;
+        if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyName, &deviceName) == noErr) {
+            deviceNames[endpointNumber] = (__bridge NSString *)deviceName;
+        }
 
         CFStringRef vendorName;
-        MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &vendorName);
-        vendorNames[endpointNumber] = (__bridge NSString *)vendorName;
+        if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &vendorName) == noErr) {
+            vendorNames[endpointNumber] = (__bridge NSString *)vendorName;
+        }
 
         CFStringRef productName;
-        MIDIObjectGetStringProperty(endpoint, kMIDIPropertyModel, &productName);
-        productNames[endpointNumber] = (__bridge NSString *)productName;
+        if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyModel, &productName) == noErr) {
+            productNames[endpointNumber] = (__bridge NSString *)productName;
+        }
 
         if (![sourceSet member: endpointNumber]) {
             OSStatus err;
-            err = MIDIPortConnectSource(inputPort, endpoint, (__bridge void*)endpointNumber);
+            if (protocolId == kMIDIProtocol_2_0) {
+                err = MIDIPortConnectSource(inputPort2, endpoint, (__bridge void*)endpointNumber);
+            } else {
+                err = MIDIPortConnectSource(inputPort, endpoint, (__bridge void*)endpointNumber);
+            }
             if (err == noErr) {
                 [sourceSet addObject: endpointNumber];
 
@@ -705,8 +1112,14 @@ void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) 
                     }
                 }
                 if (!hasKey) {
-                    if (onMidiInputDeviceAttached) {
-                        onMidiInputDeviceAttached([NSString stringWithFormat:@"%@", endpointNumber].UTF8String);
+                    if (protocolId == kMIDIProtocol_2_0) {
+                        if (onMidi2InputDeviceAttached) {
+                            onMidi2InputDeviceAttached([NSString stringWithFormat:@"%@", endpointNumber].UTF8String);
+                        }
+                    } else {
+                        if (onMidiInputDeviceAttached) {
+                            onMidiInputDeviceAttached([NSString stringWithFormat:@"%@", endpointNumber].UTF8String);
+                        }
                     }
                 }
             }
@@ -719,20 +1132,45 @@ void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) 
         MIDIEndpointRef endpoint = MIDIGetDestination(k);
 
         SInt32 endpointUniqueId;
-        MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId);
+        if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &endpointUniqueId) != noErr) {
+            continue;
+        }
         NSNumber* endpointNumber = [NSNumber numberWithInt:endpointUniqueId];
 
+        MIDIProtocolID protocolId = kMIDIProtocol_1_0;
+        if (@available(macOS 11.0, iOS 14.0, *)) {
+            SInt32 protocolIdValue;
+            if (MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyProtocolID, &protocolIdValue) == noErr) {
+                protocolId = (MIDIProtocolID)protocolIdValue;
+            }
+        }
+
+        if (protocolId == kMIDIProtocol_2_0) {
+            if (!isMidi2Enable) {
+                continue;
+            }
+        } else {
+            if (!isMidi1Enable) {
+                continue;
+            }
+        }
+
+        protocols[endpointNumber] = [NSNumber numberWithInt: protocolId];
+
         CFStringRef deviceName;
-        MIDIObjectGetStringProperty(endpoint, kMIDIPropertyName, &deviceName);
-        deviceNames[endpointNumber] = (__bridge NSString *)deviceName;
+        if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyName, &deviceName) == noErr) {
+            deviceNames[endpointNumber] = (__bridge NSString *)deviceName;
+        }
 
         CFStringRef vendorName;
-        MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &vendorName);
-        vendorNames[endpointNumber] = (__bridge NSString *)vendorName;
+        if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &vendorName) == noErr) {
+            vendorNames[endpointNumber] = (__bridge NSString *)vendorName;
+        }
 
         CFStringRef productName;
-        MIDIObjectGetStringProperty(endpoint, kMIDIPropertyModel, &productName);
-        productNames[endpointNumber] = (__bridge NSString *)productName;
+        if (MIDIObjectGetStringProperty(endpoint, kMIDIPropertyModel, &productName) == noErr) {
+            productNames[endpointNumber] = (__bridge NSString *)productName;
+        }
 
         if (![destinationSet member: endpointNumber]) {
             [destinationSet addObject: endpointNumber];
@@ -751,8 +1189,14 @@ void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) 
                 }
             }
             if (!hasKey) {
-                if (onMidiOutputDeviceAttached) {
-                    onMidiOutputDeviceAttached([NSString stringWithFormat:@"%@", endpointNumber].UTF8String);
+                if (protocolId == kMIDIProtocol_2_0) {
+                    if (onMidi2OutputDeviceAttached) {
+                        onMidi2OutputDeviceAttached([NSString stringWithFormat:@"%@", endpointNumber].UTF8String);
+                    }
+                } else {
+                    if (onMidiOutputDeviceAttached) {
+                        onMidiOutputDeviceAttached([NSString stringWithFormat:@"%@", endpointNumber].UTF8String);
+                    }
                 }
             }
         }
@@ -769,17 +1213,32 @@ void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) 
 
         if (!hasKey) {
             if ([sourceSet member: key]) {
+                MIDIProtocolID protocolId = (MIDIProtocolID)[(NSNumber*)protocols[key] intValue];
                 [sourceSet removeObject: key];
-                if (onMidiInputDeviceDetached) {
-                    onMidiInputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+                if (protocolId == kMIDIProtocol_2_0) {
+                    if (onMidi2InputDeviceDetached) {
+                        onMidi2InputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+                    }
+                } else {
+                    if (onMidiInputDeviceDetached) {
+                        onMidiInputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+                    }
                 }
             }
             if ([destinationSet member: key]) {
+                MIDIProtocolID protocolId = (MIDIProtocolID)[(NSNumber*)protocols[key] intValue];
                 [destinationSet removeObject: key];
-                if (onMidiOutputDeviceDetached) {
-                    onMidiOutputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+                if (protocolId == kMIDIProtocol_2_0) {
+                    if (onMidi2OutputDeviceDetached) {
+                        onMidi2OutputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+                    }
+                } else {
+                    if (onMidiOutputDeviceDetached) {
+                        onMidiOutputDeviceDetached([NSString stringWithFormat:@"%@", key].UTF8String);
+                    }
                 }
             }
+            [protocols removeObjectForKey: key];
         }
     }
 }
