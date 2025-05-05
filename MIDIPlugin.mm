@@ -115,6 +115,7 @@ NSMutableDictionary *protocols;
 NSTimer *deviceUpdateTimer;
 BOOL isMidi1Enable = NO;
 BOOL isMidi2Enable = NO;
+BOOL isPluginEnable = NO;
 
 OnMidiInputDeviceAttachedDelegate onMidiInputDeviceAttached;
 OnMidiOutputDeviceAttachedDelegate onMidiOutputDeviceAttached;
@@ -151,6 +152,7 @@ OnUmpMessageDelegate onUmpMessage;
 
 void midiPluginInitialize() {
     isMidi1Enable = YES;
+    isPluginEnable = YES;
     BOOL isNewInstance = NO;
     if (instance == nil) {
         instance = [[MidiPlugin alloc] init];
@@ -178,6 +180,7 @@ void midiPluginTerminate() {
     isMidi1Enable = NO;
 
     if (!isMidi1Enable && !isMidi2Enable) {
+        isPluginEnable = NO;
         if (deviceUpdateTimer != nil) {
             [deviceUpdateTimer invalidate];
             deviceUpdateTimer = nil;
@@ -200,6 +203,7 @@ void midiPluginTerminate() {
 
 void midi2PluginInitialize() {
     isMidi2Enable = YES;
+    isPluginEnable = YES;
     BOOL isNewInstance = NO;
     if (instance == nil) {
         instance = [[MidiPlugin alloc] init];
@@ -227,6 +231,7 @@ void midi2PluginTerminate() {
     isMidi2Enable = NO;
 
     if (!isMidi1Enable && !isMidi2Enable) {
+        isPluginEnable = NO;
         if (deviceUpdateTimer != nil) {
             [deviceUpdateTimer invalidate];
             deviceUpdateTimer = nil;
@@ -254,14 +259,18 @@ void midiPluginStartForEditor() {
         return;
     }
 
-    // network session
-    if (@available(macOS 10.15, iOS 4.2, *)) {
-        MIDINetworkSession* session = [MIDINetworkSession defaultSession];
-        session.enabled = YES;
-        session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
-
-        [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+    if (!isPluginEnable) {
+        // restart network session
+        if (@available(macOS 10.15, iOS 4.2, *)) {
+            MIDINetworkSession* session = [MIDINetworkSession defaultSession];
+            session.enabled = YES;
+            session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+            
+            [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+        }
     }
+
+    isPluginEnable = YES;
 
     if (!isMidi1Enable) {
         return;
@@ -287,11 +296,15 @@ void midiPluginStartForEditor() {
 }
 
 void midiPluginStopForEditor() {
+    // remove network session
     [[NSNotificationCenter defaultCenter] removeObserver: instance];
+
     if (deviceUpdateTimer != nil) {
         [deviceUpdateTimer invalidate];
         deviceUpdateTimer = nil;
     }
+
+    isPluginEnable = NO;
 }
 
 void midi2PluginStartForEditor() {
@@ -301,14 +314,18 @@ void midi2PluginStartForEditor() {
         return;
     }
 
-    // network session
-    if (@available(macOS 10.15, iOS 4.2, *)) {
-        MIDINetworkSession* session = [MIDINetworkSession defaultSession];
-        session.enabled = YES;
-        session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
-
-        [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+    if (!isPluginEnable) {
+        // restart network session
+        if (@available(macOS 10.15, iOS 4.2, *)) {
+            MIDINetworkSession* session = [MIDINetworkSession defaultSession];
+            session.enabled = YES;
+            session.connectionPolicy = MIDINetworkConnectionPolicy_Anyone;
+            
+            [[NSNotificationCenter defaultCenter] addObserver:instance selector:@selector(getMidiDevices) name:MIDINetworkNotificationContactsDidChange object:nil];
+        }
     }
+
+    isPluginEnable = YES;
 
     if (!isMidi2Enable) {
         return;
@@ -334,11 +351,15 @@ void midi2PluginStartForEditor() {
 }
 
 void midi2PluginStopForEditor() {
+    // remove network session
     [[NSNotificationCenter defaultCenter] removeObserver: instance];
+
     if (deviceUpdateTimer != nil) {
         [deviceUpdateTimer invalidate];
         deviceUpdateTimer = nil;
     }
+
+    isPluginEnable = NO;
 }
 
 const char* getDeviceName(const char* deviceId) {
@@ -467,6 +488,10 @@ void SetUmpMessageCallback(OnUmpMessageDelegate callback) {
 }
 
 void sendMidiData(const char* deviceId, unsigned char* byteArray, int length) {
+    if (!isPluginEnable) {
+        return;
+    }
+
     ItemCount numOfDevices = MIDIGetNumberOfDevices();
     BOOL deviceFound = NO;
 
@@ -514,6 +539,10 @@ void sendMidiData(const char* deviceId, unsigned char* byteArray, int length) {
 }
 
 void sendMidiPacketToDevice(MIDIEndpointRef endpoint, unsigned char* byteArray, int length) {
+    if (!isPluginEnable) {
+        return;
+    }
+
     MIDIProtocolID protocolId = kMIDIProtocol_1_0;
     if (@available(macOS 11.0, iOS 14.0, *)) {
         SInt32 protocolIdValue;
@@ -550,6 +579,10 @@ void sendMidiPacketToDevice(MIDIEndpointRef endpoint, unsigned char* byteArray, 
 }
 
 void sendUmpMessage(const char* deviceId, UInt32* wordArray, int length) {
+    if (!isPluginEnable) {
+        return;
+    }
+
     ItemCount numOfDevices = MIDIGetNumberOfDevices();
     BOOL deviceFound = NO;
 
@@ -597,6 +630,10 @@ void sendUmpMessage(const char* deviceId, UInt32* wordArray, int length) {
 }
 
 void sendUmpPacketToDevice(MIDIEndpointRef endpoint, UInt32* wordArray, int length) {
+    if (!isPluginEnable) {
+        return;
+    }
+
     if (@available(macOS 11.0, iOS 14.0, *)) {
         MIDIProtocolID protocolId = kMIDIProtocol_1_0;
         SInt32 protocolIdValue;
@@ -618,6 +655,9 @@ void sendUmpPacketToDevice(MIDIEndpointRef endpoint, UInt32* wordArray, int leng
 
 void midi2InputCallback(const MIDIEventList *list, void * __nullable srcRef) {
     if (!isMidi2Enable) {
+        return;
+    }
+    if (!isPluginEnable) {
         return;
     }
 
@@ -673,6 +713,9 @@ void midi2InputCallback(const MIDIEventList *list, void * __nullable srcRef) {
 
 void midiInputCallback(const MIDIPacketList *list, void *procRef, void *srcRef) {
     if (!isMidi1Enable) {
+        return;
+    }
+    if (!isPluginEnable) {
         return;
     }
 
