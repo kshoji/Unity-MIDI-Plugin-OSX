@@ -253,9 +253,10 @@ void midi2PluginTerminate() {
 }
 
 void midiPluginStartForEditor() {
-    // NOTE: call before `midiPluginInitialize` method
+    // NOTE: For Unity editor, call this method instead of `midiPluginInitialize` method
 
     if (!instance) {
+        midiPluginInitialize();
         return;
     }
 
@@ -308,9 +309,10 @@ void midiPluginStopForEditor() {
 }
 
 void midi2PluginStartForEditor() {
-    // NOTE: call before `midiPluginInitialize` method
+    // NOTE: For Unity editor, call this method instead of `midi2PluginInitialize` method
 
     if (!instance) {
+        midi2PluginInitialize();
         return;
     }
 
